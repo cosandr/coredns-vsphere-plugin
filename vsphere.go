@@ -21,6 +21,7 @@ import (
 // Define log to be a logger with the plugin name in it. This way we can just use log.Info and
 // friends to log.
 var log = clog.NewWithPlugin("vsphere")
+var addressCache map[string]string
 
 func NewClient(ctx context.Context, clientURL string, user string, pass string, insecure bool) (*vim25.Client, error) {
 	// Parse URL from string
@@ -37,6 +38,7 @@ func NewClient(ctx context.Context, clientURL string, user string, pass string, 
 	}
 
 	c := new(vim25.Client)
+	// log doesn't seem to work here
 	err = s.Login(ctx, c, nil)
 	if err != nil {
 		return nil, err
@@ -56,26 +58,21 @@ func NewVSphere(url string, user string, pass string, insecure bool) (VSphere, e
 
 // VSphere is an vsphere plugin to show how to write a plugin.
 type VSphere struct {
-	Next plugin.Handler
+	Next   plugin.Handler
 	Client *vim25.Client
 }
+
 // Name implements the Handler interface.
 func (v VSphere) Name() string { return pluginName }
 
 func (v VSphere) Ready() bool { return v.Client != nil }
 
-// ServeDNS implements the plugin.Handler interface. This method gets called when vsphere is used
-// in a Server.
-func (v VSphere) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) (int, error) {
-	log.Debug("Received response")
-	pw := NewResponsePrinter(w)
-
+func (v VSphere) updateCache(ctx context.Context) error {
 	m := view.NewManager(v.Client)
 
 	cv, err := m.CreateContainerView(ctx, v.Client.ServiceContent.RootFolder, []string{"VirtualMachine"}, true)
 	if err != nil {
-		log.Error(err)
-		return plugin.NextOrFailure(v.Name(), v.Next, ctx, pw, r)
+		return err
 	}
 
 	defer cv.Destroy(ctx)
@@ -84,7 +81,7 @@ func (v VSphere) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg)
 	// Get only running VMs
 	// Fetch all to cache and also check both vSphere name and hostname
 	filters := property.Filter{
-		"summary.config.template": "false",
+		"summary.config.template":    "false",
 		"summary.runtime.powerState": "poweredOn",
 	}
 	objs, err := cv.Find(ctx, []string{"VirtualMachine"}, filters)
@@ -94,30 +91,54 @@ func (v VSphere) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg)
 	log.Debug("fetching VMs from API")
 	err = pc.Retrieve(ctx, objs, fields, &vms)
 
-	state := request.Request{W: w, Req: r}
-	search := strings.TrimRight(state.QName(), ".")
-	ipAddress := ""
-	log.Debugf("got %d VMs, searching for %s", len(vms), search)
+	addressCache = make(map[string]string)
+	log.Debugf("got %d VMs", len(vms))
 	for _, vm := range vms {
-		if vm.Summary.Config.Name == search || vm.Summary.Guest.HostName == search {
-			ipAddress = vm.Summary.Guest.IpAddress
-			break
+		if vm.Summary.Guest.IpAddress != "" {
+			addressCache[vm.Summary.Config.Name] = vm.Summary.Guest.IpAddress
+			// Also add hostname if it differs
+			if vm.Summary.Config.Name != vm.Summary.Guest.HostName {
+				addressCache[vm.Summary.Guest.HostName] = vm.Summary.Guest.IpAddress
+			}
 		}
 	}
-	if ipAddress == "" {
-		log.Debugf("did not find %s", search)
-		return plugin.NextOrFailure(v.Name(), v.Next, ctx, pw, r)
+	log.Debugf("cached %d names", len(addressCache))
+	return nil
+}
+
+// ServeDNS implements the plugin.Handler interface. This method gets called when vsphere is used
+// in a Server.
+func (v VSphere) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) (int, error) {
+	pw := NewResponsePrinter(w)
+	state := request.Request{W: w, Req: r}
+	search := strings.TrimRight(state.QName(), ".")
+
+	log.Debugf("searching for '%s', %d names in cache", search, len(addressCache))
+	ipAddress, ok := addressCache[search]
+	// Not in cache, update it
+	if !ok {
+		log.Debugf("'%s' not in cache", search)
+		err := v.updateCache(ctx)
+		if err != nil {
+			log.Error(err)
+			return plugin.NextOrFailure(v.Name(), v.Next, ctx, pw, r)
+		}
+		ipAddress, ok = addressCache[search]
+		if !ok {
+			log.Debugf("did not find %s", search)
+			return plugin.NextOrFailure(v.Name(), v.Next, ctx, pw, r)
+		}
+	} else {
+		log.Debugf("'%s' in cache", search)
 	}
 	log.Debugf("found %s: %s", search, ipAddress)
 	rec := new(dns.A)
 	rec.Hdr = dns.RR_Header{Name: state.QName(), Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 3600}
 	rec.A = net.ParseIP(ipAddress)
-	var answers []dns.RR
-	answers = append(answers, rec)
 	man := new(dns.Msg)
-	man.Answer = answers
+	man.Answer = []dns.RR{rec}
 	man.SetReply(r)
-	err = w.WriteMsg(man)
+	err := w.WriteMsg(man)
 
 	if err != nil {
 		log.Error(err)
@@ -126,7 +147,6 @@ func (v VSphere) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg)
 
 	return dns.RcodeSuccess, nil
 }
-
 
 // ResponsePrinter wrap a dns.ResponseWriter and will write vsphere to standard output when WriteMsg is called.
 type ResponsePrinter struct {
