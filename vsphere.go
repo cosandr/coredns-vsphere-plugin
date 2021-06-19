@@ -109,7 +109,6 @@ func (v VSphere) updateCache(ctx context.Context) error {
 // ServeDNS implements the plugin.Handler interface. This method gets called when vsphere is used
 // in a Server.
 func (v VSphere) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) (int, error) {
-	pw := NewResponsePrinter(w)
 	state := request.Request{W: w, Req: r}
 	search := strings.TrimRight(state.QName(), ".")
 
@@ -121,12 +120,12 @@ func (v VSphere) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg)
 		err := v.updateCache(ctx)
 		if err != nil {
 			log.Error(err)
-			return plugin.NextOrFailure(v.Name(), v.Next, ctx, pw, r)
+			return plugin.NextOrFailure(v.Name(), v.Next, ctx, w, r)
 		}
 		ipAddress, ok = addressCache[search]
 		if !ok {
 			log.Debugf("did not find %s", search)
-			return plugin.NextOrFailure(v.Name(), v.Next, ctx, pw, r)
+			return plugin.NextOrFailure(v.Name(), v.Next, ctx, w, r)
 		}
 	} else {
 		log.Debugf("'%s' in cache", search)
@@ -142,24 +141,8 @@ func (v VSphere) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg)
 
 	if err != nil {
 		log.Error(err)
-		return plugin.NextOrFailure(v.Name(), v.Next, ctx, pw, r)
+		return plugin.NextOrFailure(v.Name(), v.Next, ctx, w, r)
 	}
 
 	return dns.RcodeSuccess, nil
-}
-
-// ResponsePrinter wrap a dns.ResponseWriter and will write vsphere to standard output when WriteMsg is called.
-type ResponsePrinter struct {
-	dns.ResponseWriter
-}
-
-// NewResponsePrinter returns ResponseWriter.
-func NewResponsePrinter(w dns.ResponseWriter) *ResponsePrinter {
-	return &ResponsePrinter{ResponseWriter: w}
-}
-
-// WriteMsg calls the underlying ResponseWriter's WriteMsg method and prints "vsphere" to standard output.
-func (r *ResponsePrinter) WriteMsg(res *dns.Msg) error {
-	log.Info("vsphere")
-	return r.ResponseWriter.WriteMsg(res)
 }
