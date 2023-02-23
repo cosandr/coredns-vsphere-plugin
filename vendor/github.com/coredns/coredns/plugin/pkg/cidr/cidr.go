@@ -4,19 +4,28 @@ package cidr
 import (
 	"math"
 	"net"
+	"strings"
 
 	"github.com/apparentlymart/go-cidr/cidr"
 	"github.com/miekg/dns"
 )
 
-// Class return slice of "classful" (/8, /16, /24 or /32 only) CIDR's from the CIDR in net.
-func Class(n *net.IPNet) []string {
+// Split returns a slice of non-overlapping subnets that in union equal the subnet n,
+// and where each subnet falls on a reverse name segment boundary.
+// for ipv4 this is any multiple of 8 bits (/8, /16, /24 or /32)
+// for ipv6 this is any multiple of 4 bits
+func Split(n *net.IPNet) []string {
+	boundary := 8
+	nstr := n.String()
+	if strings.Contains(nstr, ":") {
+		boundary = 4
+	}
 	ones, _ := n.Mask.Size()
-	if ones%8 == 0 {
+	if ones%boundary == 0 {
 		return []string{n.String()}
 	}
 
-	mask := int(math.Ceil(float64(ones)/8)) * 8
+	mask := int(math.Ceil(float64(ones)/float64(boundary))) * boundary
 	networks := nets(n, mask)
 	cidrs := make([]string, len(networks))
 	for i := range networks {
@@ -29,7 +38,7 @@ func Class(n *net.IPNet) []string {
 func nets(network *net.IPNet, newPrefixLen int) []*net.IPNet {
 	prefixLen, _ := network.Mask.Size()
 	maxSubnets := int(math.Exp2(float64(newPrefixLen)) / math.Exp2(float64(prefixLen)))
-	nets := []*net.IPNet{{network.IP, net.CIDRMask(newPrefixLen, 8*len(network.IP))}}
+	nets := []*net.IPNet{{IP: network.IP, Mask: net.CIDRMask(newPrefixLen, 8*len(network.IP))}}
 
 	for i := 1; i < maxSubnets; i++ {
 		next, exceeds := cidr.NextSubnet(nets[len(nets)-1], newPrefixLen)

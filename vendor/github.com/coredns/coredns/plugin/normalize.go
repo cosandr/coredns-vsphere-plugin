@@ -125,7 +125,6 @@ func (h Host) NormalizeExact() []string {
 	}
 	for i := range hosts {
 		hosts[i] = Name(hosts[i]).Normalize()
-
 	}
 	return hosts
 }
@@ -163,8 +162,12 @@ func SplitHostPort(s string) (hosts []string, port string, err error) {
 		return []string{s}, port, nil
 	}
 
+	if s[0] == ':' || (s[0] == '0' && strings.Contains(s, ":")) {
+		return nil, "", fmt.Errorf("invalid CIDR %s", s)
+	}
+
 	// now check if multiple hosts must be returned.
-	nets := cidr.Class(n)
+	nets := cidr.Split(n)
 	hosts = cidr.Reverse(nets)
 	return hosts, port, nil
 }
